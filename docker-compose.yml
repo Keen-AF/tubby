@@ -1,0 +1,22 @@
+services:
+  tubby:
+    build:
+      context: .
+      args:
+        # Bump this and rebuild when YouTube breaks things (it will).
+        YTDLP_VERSION: "2026.08.19"
+    image: tubby:latest
+    container_name: tubby
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # TUBBY_PASSWORD: "change-me"        # turn on the login page
+      # TUBBY_SECRET: "long-random-string" # keeps logins valid across restarts
+      TUBBY_GRACE: "300"                   # seconds files survive after the window closes
+      TUBBY_TIMEOUT: "300"                 # seconds files survive after the window goes silent
+      TUBBY_CONCURRENCY: "2"
+      # TUBBY_COOKIES: /cookies/cookies.txt  # if YouTube asks you to "confirm you're not a bot"
+    # volumes:
+    #   - ./cookies:/cookies
+    # No data volume on purpose: downloads are meant to be forgotten.

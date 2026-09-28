@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tubby</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='6' width='28' height='20' rx='6' fill='%23e5484d'/%3E%3Cpath d='M13 11v10l9-5z' fill='white'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --ink: #1c1b19; --muted: #6d6a64; --line: #e4e1db;
+    --accent: #e5484d; --accent-ink: #fff; --ok: #2f9e5b; --warn: #b7791f; --bar: #efece6;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --card: #1d1c1a; --ink: #eceae5; --muted: #9a968e; --line: #2e2c29;
+      --accent: #ff6369; --accent-ink: #1a0a0a; --ok: #4cc38a; --warn: #f0b04a; --bar: #2a2926;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(24px, env(safe-area-inset-top)) 16px max(32px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 26px; margin: 0; letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; }
+  h1 svg { width: 30px; height: 30px; }
+  .linkish { background: none; border: 0; color: var(--muted); cursor: pointer; font: inherit; padding: 0; }
+  .linkish:hover { color: var(--ink); text-decoration: underline; }
+
+  form { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
+  .field { position: relative; }
+  input[type=url], select, button.primary {
+    height: 46px; border-radius: 10px; border: 1px solid var(--line); background: var(--card);
+    color: var(--ink); font: inherit;
+  }
+  input[type=url] { width: 100%; padding: 0 76px 0 14px; }
+  input[type=url]:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  .paste {
+    position: absolute; right: 6px; top: 6px; height: 34px; padding: 0 10px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--muted); font: inherit; font-size: 13px; cursor: pointer;
+  }
+  select { padding: 0 10px; cursor: pointer; }
+  button.primary {
+    padding: 0 22px; background: var(--accent); color: var(--accent-ink); border-color: transparent;
+    font-weight: 600; cursor: pointer;
+  }
+  button.primary:disabled { opacity: .6; cursor: progress; }
+  @media (max-width: 560px) {
+    form { grid-template-columns: 1fr 1fr; }
+    .field { grid-column: 1 / -1; }
+  }
+
+  .notice { margin: 12px 2px 0; color: var(--muted); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  .notice svg { flex: none; }
+  .formerr { color: var(--accent); font-size: 14px; margin: 10px 2px 0; min-height: 0; }
+
+  #jobs { list-style: none; margin: 24px 0 0; padding: 0; display: grid; gap: 10px; }
+  .job { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .row { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
+  .title { font-weight: 600; word-break: break-word; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; word-break: break-all; }
+  .actions { display: flex; gap: 6px; flex: none; }
+  .actions a, .actions button {
+    font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); cursor: pointer; text-decoration: none; white-space: nowrap;
+  }
+  .actions a.save { background: var(--ok); border-color: transparent; color: #fff; font-weight: 600; }
+  .bar { height: 6px; border-radius: 3px; background: var(--bar); overflow: hidden; margin-top: 12px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+  .job[data-status=processing] .bar > i { width: 100% !important; animation: pulse 1.2s ease-in-out infinite; }
+  .job[data-status=queued] .bar > i { width: 0 !important; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  .job[data-status=done] .bar, .job[data-status=error] .bar, .job[data-status=cancelled] .bar { display: none; }
+  .meta { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12.5px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .job[data-status=done] .meta { display: none; }
+  .err { color: var(--accent); font-size: 13px; margin-top: 8px; word-break: break-word; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="6" width="28" height="20" rx="6" fill="var(--accent)"/><path d="M13 11v10l9-5z" fill="var(--accent-ink)"/></svg>
+      Tubby
+    </h1>
+    <button class="linkish" id="logout" hidden>Log out</button>
+  </header>
+
+  <form id="grab" autocomplete="off">
+    <div class="field">
+      <input type="url" id="url" name="url" placeholder="Paste a YouTube link…" required autofocus inputmode="url">
+      <button type="button" class="paste" id="paste" hidden>Paste</button>
+    </div>
+    <select id="preset" aria-label="Quality">
+      <option value="best">Best quality</option>
+      <option value="1080">1080p</option>
+      <option value="720">720p</option>
+      <option value="audio">Audio (mp3)</option>
+    </select>
+    <button class="primary" id="go">Grab</button>
+  </form>
+  <div class="formerr" id="formerr" role="alert"></div>
+  <p class="notice">
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.5v4l2.5 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <span id="notice">Files are deleted from the server a few minutes after you close this window.</span>
+  </p>
+
+  <ul id="jobs"></ul>
+  <div class="empty" id="empty">Nothing yet. Paste a link above.</div>
+</main>
+
+<template id="job-tpl">
+  <li class="job">
+    <div class="row">
+      <div>
+        <div class="title"></div>
+        <div class="sub"></div>
+      </div>
+      <div class="actions">
+        <a class="save" hidden>Save</a>
+        <button class="cancel" type="button">Cancel</button>
+      </div>
+    </div>
+    <div class="bar"><i></i></div>
+    <div class="meta"><span class="left"></span><span class="right"></span></div>
+    <div class="err" hidden></div>
+  </li>
+</template>
+
+<script>
+(() => {
+  // One session per window: sessionStorage survives reloads (and "reopen closed tab")
+  // but not a real close, which is what makes the server forget.
+  const sid = (() => {
+    let s = sessionStorage.getItem("tubby-sid");
+    if (!s) {
+      const b = crypto.getRandomValues(new Uint8Array(16));   // works on plain-http LAN too
+      s = Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+      sessionStorage.setItem("tubby-sid", s);
+    }
+    return s;
+  })();
+
+  const $ = id => document.getElementById(id);
+  const PRESET = { best: "Best", "1080": "1080p", "720": "720p", audio: "MP3" };
+  const ACTIVE = new Set(["queued", "downloading", "processing"]);
+  const nodes = new Map();
+  let active = false;
+  let timer;
+
+  async function api(path, opts = {}) {
+    const r = await fetch(path, { ...opts, headers: { "X-Tubby-Session": sid, ...(opts.headers || {}) } });
+    if (r.status === 401) { location.href = "/login"; throw new Error("login required"); }
+    return r;
+  }
+
+  const bytes = n => {
+    if (n == null) return "";
+    const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(i && n < 10 ? 1 : 0)} ${u[i]}`;
+  };
+  const dur = s => {
+    if (s == null) return "";
+    s = Math.round(s);
+    return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m`
+         : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+  };
+
+  function render(jobs) {
+    const seen = new Set();
+    for (const j of jobs) {
+      seen.add(j.id);
+      let el = nodes.get(j.id);
+      if (!el) {
+        el = $("job-tpl").content.firstElementChild.cloneNode(true);
+        el.dataset.id = j.id;
+        nodes.set(j.id, el);
+        $("jobs").prepend(el);
+      }
+      el.dataset.status = j.status;
+      el.querySelector(".title").textContent = j.title || j.filename || "Fetching info…";
+      el.querySelector(".sub").textContent =
+        j.status === "done" ? `${PRESET[j.preset]} · ${bytes(j.size)} · ${j.filename}` : `${PRESET[j.preset]} · ${j.url}`;
+
+      const save = el.querySelector(".save");
+      save.hidden = j.status !== "done";
+      if (j.status === "done" && !save.href) {
+        save.href = `/files/${j.id}?s=${sid}`;
+        save.download = j.filename || "";
+      }
+      const cancel = el.querySelector(".cancel");
+      cancel.textContent = ACTIVE.has(j.status) ? "Cancel" : "Remove";
+
+      el.querySelector(".bar > i").style.width = `${j.percent}%`;
+      const left = { queued: "Waiting in queue…", processing: "Merging / converting…" }[j.status]
+        ?? (j.status === "downloading" ? `${j.stream === "audio" ? "Audio" : "Video"} · ${j.percent.toFixed(1)}%` : "");
+      el.querySelector(".left").textContent = j.status === "cancelled" ? "Cancelled" : left;
+      el.querySelector(".right").textContent = j.status === "downloading"
+        ? [j.speed ? `${bytes(j.speed)}/s` : "", j.eta != null ? `${dur(j.eta)} left` : ""].filter(Boolean).join(" · ") : "";
+
+      const err = el.querySelector(".err");
+      err.hidden = j.status !== "error";
+      err.textContent = j.error || "";
+    }
+    for (const [id, el] of nodes) if (!seen.has(id)) { el.remove(); nodes.delete(id); }
+    $("empty").hidden = nodes.size > 0;
+    active = jobs.some(j => ACTIVE.has(j.status));
+  }
+
+  // Polling doubles as the heartbeat that keeps this window's files alive.
+  async function poll() {
+    clearTimeout(timer);
+    try {
+      const r = await api("/api/jobs");
+      const data = await r.json();
+      render(data.jobs);
+      $("logout").hidden = !data.auth;
+      const mins = Math.round(data.grace / 60);
+      $("notice").textContent = data.grace >= 60
+        ? `Files are deleted from the server ${mins} minute${mins === 1 ? "" : "s"} after you close this window.`
+        : `Files are deleted from the server ${data.grace}s after you close this window.`;
+    } catch (e) { /* server restarting or offline: keep trying */ }
+    timer = setTimeout(poll, active ? 1000 : 4000);
+  }
+
+  $("grab").addEventListener("submit", async e => {
+    e.preventDefault();
+    const url = $("url").value.trim();
+    if (!url) return;
+    $("go").disabled = true;
+    $("formerr").textContent = "";
+    try {
+      const r = await api("/api/jobs", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, preset: $("preset").value }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "Something went wrong.");
+      $("url").value = "";
+      active = true;
+      poll();
+    } catch (err) {
+      $("formerr").textContent = err.message;
+    } finally {
+      $("go").disabled = false;
+      $("url").focus();
+    }
+  });
+
+  $("jobs").addEventListener("click", async e => {
+    const btn = e.target.closest(".cancel");
+    if (!btn) return;
+    const id = btn.closest(".job").dataset.id;
+    btn.disabled = true;
+    await api(`/api/jobs/${id}`, { method: "DELETE" }).catch(() => {});
+    btn.disabled = false;
+    const r = await api("/api/jobs").catch(() => null);
+    if (r) render((await r.json()).jobs);
+  });
+
+  if (navigator.clipboard?.readText) {   // only available on https/localhost
+    $("paste").hidden = false;
+    $("paste").addEventListener("click", async () => {
+      try { $("url").value = (await navigator.clipboard.readText()).trim(); $("url").focus(); } catch {}
+    });
+  }
+
+  $("logout").addEventListener("click", async () => {
+    await api("/api/logout", { method: "POST" }).catch(() => {});
+    location.href = "/login";
+  });
+
+  // ?url=... prefills the box (handy for bookmarklets / share shortcuts).
+  const pre = new URLSearchParams(location.search).get("url");
+  if (pre) { $("url").value = pre; history.replaceState(null, "", "/"); }
+
+  // Tell the server the window is going away; it waits out the grace period
+  // before forgetting, and a reload's next poll cancels the countdown.
+  addEventListener("pagehide", () => navigator.sendBeacon(`/api/bye?s=${sid}`));
+
+  poll();
+})();
+</script>
+</body>
+</html>
