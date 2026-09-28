@@ -17,7 +17,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,6 +36,15 @@ TIMEOUT = int(os.environ.get("TUBBY_TIMEOUT", "300"))  # seconds kept after the 
 YTDLP = os.environ.get("TUBBY_YTDLP", "yt-dlp")
 COOKIES = os.environ.get("TUBBY_COOKIES", "")          # optional Netscape cookies.txt
 STATIC = Path(__file__).resolve().parent / "static"
+
+SEARCH_PAGE = 12
+SEARCH_TTL = 600                                       # seconds a search result is cached
+LOOKUP_SLOTS = threading.BoundedSemaphore(3)           # yt-dlp searches / preview lookups at once
+# Small preview: one combined file when YouTube still has one (itag 18), otherwise separate
+# low-res H.264 video + AAC audio that the page plays side by side. H.264 first for Safari.
+PREVIEW_FORMAT = ("18/bv[height<=360][vcodec^=avc1]+ba[ext=m4a]/bv[height<=480][vcodec^=avc1]+ba[ext=m4a]"
+                  "/bv[height<=480]+ba/b[height<=480]")
+PREVIEW_CHUNK = 10 * 1024 * 1024                       # YouTube throttles large range requests
 
 COOKIE_NAME = "tubby_auth"
 COOKIE_TTL = 30 * 24 * 3600
@@ -157,6 +168,21 @@ def reaper():
 
 # ---------------------------------------------------------------- downloads
 
+PLAYLIST_MSG = "Playlists and channels aren't supported yet. Paste a link to a single video."
+
+
+def is_collection(url):
+    """True for YouTube links that point at a playlist or channel rather than one video."""
+    u = urllib.parse.urlsplit(url)
+    host = (u.hostname or "").lower()
+    if not (host == "youtube.com" or host.endswith(".youtube.com")):
+        return False  # youtu.be links always name a video; other sites are caught in run_job
+    q = urllib.parse.parse_qs(u.query)
+    if "list" in q and "v" not in q:
+        return True
+    return re.match(r"^/(playlist|channel/|c/|user/|@)", u.path) is not None
+
+
 def num(v):
     try:
         return float(v)
@@ -214,6 +240,11 @@ def run_job(job):
                 if job.status != "cancelled":
                     job.status, job.speed, job.eta = "processing", None, None
         elif line.startswith("@@TITLE "):
+            if job.title is not None:  # a second item: this link was a playlist after all
+                with lock:
+                    job.status, job.error = "error", PLAYLIST_MSG
+                kill(job)
+                break
             job.title = line[8:]
         elif line.startswith("@@FILE "):
             job.file = Path(line[7:])
@@ -222,7 +253,7 @@ def run_job(job):
     code = proc.wait()
 
     with lock:
-        if job.status == "cancelled":
+        if job.status in ("cancelled", "error"):
             pass
         elif code == 0 and job.file and job.file.is_file() and job.file.resolve().is_relative_to(job.dir):
             job.status, job.percent, job.size = "done", 100.0, job.file.stat().st_size
@@ -236,6 +267,180 @@ def run_job(job):
         failed = job.status != "done"
     if failed:
         shutil.rmtree(job.dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- search
+
+search_cache = {}        # (query, page) -> (expires, results)
+
+
+def search(query, page):
+    """YouTube search via yt-dlp's ytsearch, flat (no per-video lookups), one page at a time."""
+    key = (query.casefold(), page)
+    now = time.monotonic()
+    with lock:
+        hit = search_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+    first, last = (page - 1) * SEARCH_PAGE + 1, page * SEARCH_PAGE
+    cmd = [YTDLP, "--flat-playlist", "-J", "--no-warnings", "--no-color",
+           "--playlist-items", f"{first}-{last}"]
+    if COOKIES:
+        cmd += ["--cookies", COOKIES]
+    cmd += ["--", f"ytsearch{last}:{query}"]
+    if not LOOKUP_SLOTS.acquire(timeout=20):
+        raise RuntimeError("Search is busy, try again in a moment.")
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=45, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Search timed out.")
+    except OSError as e:
+        raise RuntimeError(f"Could not start yt-dlp: {e}")
+    finally:
+        LOOKUP_SLOTS.release()
+    if out.returncode != 0:
+        errors = [l for l in out.stderr.splitlines() if l.startswith("ERROR")]
+        raise RuntimeError(re.sub(r"^ERROR:\s*", "", errors[-1]) if errors else "Search failed.")
+    try:
+        entries = json.loads(out.stdout).get("entries") or []
+    except ValueError:
+        raise RuntimeError("Search returned something unexpected.")
+
+    results = []
+    for e in entries:
+        vid = str(e.get("id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+            continue  # channels / playlists mixed into results
+        results.append({
+            "id": vid,
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "title": e.get("title") or vid,
+            "channel": e.get("channel") or e.get("uploader"),
+            "duration": num(e.get("duration")),
+            "views": num(e.get("view_count")),
+            "live": e.get("live_status") == "is_live",
+        })
+    with lock:
+        for k in [k for k, (exp, _) in search_cache.items() if exp <= now]:
+            del search_cache[k]
+        if len(search_cache) < 256:
+            search_cache[key] = (now + SEARCH_TTL, results)
+    return results
+
+
+# ---------------------------------------------------------------- youtube proxy
+# Thumbnails and previews are fetched by the server, so viewers' browsers never talk to YouTube.
+
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+thumb_cache = {}         # video id -> (expires, jpeg bytes)
+preview_cache = {}       # video id -> (expires, (url, headers) or error message)
+
+
+class NoPreview(Exception):
+    pass
+
+
+def remember(cache, key, value, ttl, cap):
+    """Store in an in-memory cache, dropping expired entries and then the oldest past cap."""
+    now = time.monotonic()
+    with lock:
+        for k in [k for k, (exp, _) in cache.items() if exp <= now]:
+            del cache[k]
+        while len(cache) >= cap:
+            del cache[next(iter(cache))]
+        cache[key] = (now + ttl, value)
+
+
+def recall(cache, key):
+    with lock:
+        hit = cache.get(key)
+    return hit[1] if hit and hit[0] > time.monotonic() else None
+
+
+def upstream(url, headers=None, timeout=20):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def thumbnail(vid):
+    data = recall(thumb_cache, vid)
+    if data is None:
+        try:
+            with upstream(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg", timeout=10) as r:
+                data = r.read(512 * 1024)
+        except (urllib.error.URLError, OSError):
+            return None
+        remember(thumb_cache, vid, data, 3600, 400)
+    return data
+
+
+def preview_error(stderr):
+    """Turn yt-dlp's last ERROR line into (message for the page, worth caching?)."""
+    errors = [l for l in stderr.splitlines() if l.startswith("ERROR")]
+    err = re.sub(r"^ERROR:\s*(\[\w+\]\s*[\w-]+:\s*)?", "", errors[-1]) if errors else ""
+    print(f"[tubby] preview lookup failed: {err or 'no output'}", flush=True)
+    low = err.lower()
+    if "format is not available" in low:
+        return "There's no small version of this video to preview.", True
+    if "live event" in low or "premiere" in low:
+        return "This video hasn't started yet.", True
+    if "sign in" in low or "not a bot" in low:
+        return "YouTube wants Tubby to sign in before it can preview this (see TUBBY_COOKIES).", False
+    if "private" in low or "unavailable" in low or "removed" in low:
+        return "This video is unavailable.", True
+    return "Preview failed. Try again in a moment.", False
+
+
+def preview_source(vid, fresh=False):
+    """{"video": (url, headers), "audio": (url, headers) or None} for a small preview, via yt-dlp."""
+    hit = None if fresh else recall(preview_cache, vid)
+    if isinstance(hit, str):
+        raise NoPreview(hit)
+    if hit:
+        return hit
+    cmd = [YTDLP, "-J", "-f", PREVIEW_FORMAT, "--no-warnings", "--no-color"]
+    if COOKIES:
+        cmd += ["--cookies", COOKIES]
+    cmd += ["--", f"https://www.youtube.com/watch?v={vid}"]
+    if not LOOKUP_SLOTS.acquire(timeout=20):
+        raise NoPreview("Tubby is busy, try the preview again in a moment.")
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=45, stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError):
+        raise NoPreview("Preview timed out. Try again in a moment.")
+    finally:
+        LOOKUP_SLOTS.release()
+    if out.returncode != 0:
+        msg, lasting = preview_error(out.stderr)
+        if lasting:
+            remember(preview_cache, vid, msg, 300, 200)
+        raise NoPreview(msg)
+    try:
+        info = json.loads(out.stdout)
+    except ValueError:
+        raise NoPreview("Preview failed. Try again in a moment.")
+
+    streams, expires = {}, []
+    for f in info.get("requested_formats") or [info]:
+        url = f.get("url") or ""
+        u = urllib.parse.urlsplit(url)
+        if f.get("protocol") != "https" or not (u.hostname or "").endswith(".googlevideo.com"):
+            msg = "Live streams can't be previewed here." if info.get("is_live") else "This video can't be previewed here."
+            remember(preview_cache, vid, msg, 300, 200)
+            raise NoPreview(msg)
+        headers = {k: v for k, v in (f.get("http_headers") or {}).items() if k in ("User-Agent", "Accept-Language")}
+        streams["audio" if f.get("vcodec") == "none" else "video"] = (url, headers)
+        exp = urllib.parse.parse_qs(u.query).get("expire", [""])[0]
+        if exp.isdigit():
+            expires.append(int(exp))
+    if "video" not in streams:
+        raise NoPreview("This video can't be previewed here.")
+    source = {"video": streams["video"], "audio": streams.get("audio")}
+    ttl = min(expires) - time.time() - 120 if expires else 3600
+    remember(preview_cache, vid, source, max(60, min(ttl, 5 * 3600)), 200)
+    return source
 
 
 # ---------------------------------------------------------------- auth
@@ -264,6 +469,8 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         if self.path.startswith("/api/jobs") and self.command == "GET":
             return  # polling noise
+        if self.path.startswith(("/api/search", "/api/thumb/", "/api/preview/")):
+            return  # amnesia: don't write what people searched for or watched to the log
         sys.stderr.write(f"[http] {self.address_string()} {fmt % args}\n")
 
     def send(self, status, body=b"", ctype="text/plain; charset=utf-8", headers=None):
@@ -333,6 +540,33 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 jobs = [j.public() for j in s.jobs.values()]
             return self.json({"jobs": jobs, "grace": GRACE, "auth": bool(PASSWORD)})
+        if path == "/api/search":
+            query = q.get("q", [""])[0].strip()
+            page = q.get("page", ["1"])[0]
+            if not query or len(query) > 200:
+                return self.json({"error": "Type something to search for."}, 400)
+            if not page.isdigit() or not 1 <= int(page) <= 5:
+                return self.json({"error": "No more results."}, 400)
+            sid = self.session(q)
+            if sid:
+                touch_session(sid)
+            try:
+                results = search(query, int(page))
+            except RuntimeError as e:
+                return self.json({"error": str(e)}, 502)
+            return self.json({"results": results, "more": len(results) == SEARCH_PAGE and int(page) < 5})
+        m = re.fullmatch(r"/api/(thumb|preview)/([A-Za-z0-9_-]{11})(?:/(video|audio))?", path)
+        if m and m.group(1) == "thumb" and not m.group(3):
+            data = thumbnail(m.group(2))
+            return self.send(200, data, "image/jpeg") if data else self.send(404, "not found")
+        if m and m.group(1) == "preview" and not m.group(3):
+            try:  # the page asks this first: it does the slow lookup and says how to play it
+                source = preview_source(m.group(2))
+            except NoPreview as e:
+                return self.json({"error": str(e)}, 404)
+            return self.json({"audio": source["audio"] is not None})
+        if m and m.group(1) == "preview":
+            return self.proxy_preview(m.group(2), m.group(3))
         if path.startswith("/files/"):
             return self.serve_file(path[len("/files/"):], q)
         self.send(404, "not found")
@@ -363,6 +597,8 @@ class Handler(BaseHTTPRequestHandler):
             preset = str(data.get("preset", "best"))
             if not re.match(r"^https?://\S+$", url) or len(url) > 2048:
                 return self.json({"error": "That doesn't look like a video URL."}, 400)
+            if is_collection(url):
+                return self.json({"error": PLAYLIST_MSG}, 400)
             if preset not in PRESETS:
                 return self.json({"error": "Unknown quality preset."}, 400)
             s = touch_session(sid)
@@ -409,6 +645,60 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect("/", {"Set-Cookie": cookie})
         time.sleep(1)  # slow down guessing
         self.redirect("/login?bad=1")
+
+    def proxy_preview(self, vid, kind):
+        # Every response is a bounded 206 chunk; the <video> element asks for the next one itself.
+        m = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range", "").strip())
+        start = int(m.group(1)) if m else 0
+        last = start + PREVIEW_CHUNK - 1
+        if m and m.group(2):
+            last = min(last, int(m.group(2)))
+        for attempt in (1, 2):
+            try:
+                stream = preview_source(vid, fresh=attempt == 2)[kind]
+            except NoPreview as e:
+                return self.send(404, str(e))
+            if not stream:
+                return self.send(404, "not found")
+            url, headers = stream
+            try:
+                r = upstream(url, {**headers, "Range": f"bytes={start}-{last}"})
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 416:
+                    return self.send(416, "", headers={"Content-Range": e.headers.get("Content-Range", "bytes */0")})
+                if attempt == 1 and e.code in (403, 404, 410):
+                    continue  # stream url expired or rotated: look it up again
+                return self.send(502, "preview unavailable")
+            except (urllib.error.URLError, OSError):
+                return self.send(502, "preview unavailable")
+
+        with r:
+            ctype = r.headers.get("Content-Type", "")
+            length = r.headers.get("Content-Length")
+            crange = r.headers.get("Content-Range")
+            self.send_response(206 if crange else 200)
+            self.send_header("Content-Type", ctype if ctype.startswith(("video/", "audio/")) else "video/mp4")
+            if length:
+                self.send_header("Content-Length", length)
+            if crange:
+                self.send_header("Content-Range", crange)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if not length:
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            try:
+                while chunk := r.read(64 * 1024):
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            except OSError:  # upstream stalled mid-chunk: the byte count is now wrong, so hang up
+                self.close_connection = True
 
     def serve_file(self, job_id, q):
         sid = self.session(q)
@@ -466,7 +756,7 @@ class Handler(BaseHTTPRequestHandler):
 def check():
     """Fail loudly if a bundled dependency is missing (used at image build time)."""
     ok = True
-    for cmd in ([YTDLP, "--version"], ["ffmpeg", "-version"], ["deno", "--version"]):
+    for cmd in ([YTDLP, "--version"], ["ffmpeg", "-version"], ["ffprobe", "-version"], ["deno", "--version"]):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines()[0]
             print(f"ok   {cmd[0]}: {out}")
