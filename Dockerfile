@@ -1,30 +1,16 @@
-# syntax=docker/dockerfile:1
 # Self-contained: yt-dlp, ffmpeg and a JS runtime (deno) are all bundled,
 # so the host only needs Docker. Multi-arch (amd64/arm64).
 ARG DENO_TAG=bin
 FROM denoland/deno:${DENO_TAG} AS deno
 
-# Static ffmpeg from yt-dlp's own builds (patched for yt-dlp). Only ffmpeg is
-# kept: merging and mp3 extraction work without ffprobe.
-FROM python:3.13-slim AS ffmpeg
-ARG TARGETARCH
-RUN python - <<'EOF'
-import os, platform, tarfile, urllib.request
-arch = os.environ.get("TARGETARCH") or {"x86_64": "amd64", "aarch64": "arm64"}[platform.machine()]
-name = {"amd64": "linux64", "arm64": "linuxarm64"}[arch]
-url = f"https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-{name}-gpl.tar.xz"
-path, _ = urllib.request.urlretrieve(url)
-with tarfile.open(path) as tar:
-    m = next(m for m in tar.getmembers() if m.name.endswith("/bin/ffmpeg"))
-    m.name = "ffmpeg"
-    tar.extract(m, "/out", filter="data")
-EOF
-
 FROM python:3.13-slim
 
 ARG YTDLP_VERSION=2026.08.19
 
-COPY --from=ffmpeg /out/ffmpeg /usr/local/bin/ffmpeg
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 # yt-dlp needs an external JS runtime for full YouTube support.
 COPY --from=deno /deno /usr/local/bin/deno
 

@@ -79,6 +79,54 @@
   .job[data-status=done] .meta { display: none; }
   .err { color: var(--accent); font-size: 13px; margin-top: 8px; word-break: break-word; }
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+
+  #find { margin-top: 22px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  #search { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+  #q { height: 40px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; padding: 0 12px; width: 100%; }
+  #q:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  .ghost {
+    font: inherit; font-size: 13px; padding: 0 14px; height: 40px; border-radius: 9px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); cursor: pointer; white-space: nowrap; text-decoration: none;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .ghost:disabled { opacity: .6; cursor: progress; }
+  .ghost.small { height: 30px; padding: 0 11px; border-radius: 8px; }
+  .ghost.go { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+  .ghost.go:disabled { cursor: default; }
+  .ghost.go.added { background: var(--ok); color: #fff; opacity: 1; }
+  .searchmsg { color: var(--muted); font-size: 13px; margin: 10px 2px 0; }
+  .searchmsg.bad { color: var(--accent); }
+  .searchmsg:empty { display: none; }
+
+  #preview { margin-top: 12px; }
+  .player { position: relative; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #000; }
+  .player video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
+  .player .pmsg {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+    text-align: center; color: #fff; font-size: 14px; background: rgba(0,0,0,.55); pointer-events: none;
+  }
+  .player .pmsg:empty { display: none; }
+  .pv-row { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; margin-top: 10px; }
+  .pv-row .actions { align-items: center; }
+
+  #results { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 2px; max-height: min(430px, 60vh); overflow-y: auto; overscroll-behavior: contain; }
+  #results:empty { display: none; }
+  .hit { display: grid; grid-template-columns: 128px 1fr auto; gap: 12px; align-items: center; padding: 6px; border-radius: 9px; }
+  .hit:hover, .hit.playing { background: var(--bar); }
+  .thumb { position: relative; display: block; width: 128px; aspect-ratio: 16 / 9; border-radius: 7px; overflow: hidden; background: var(--bar); border: 0; padding: 0; cursor: pointer; }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .len { position: absolute; right: 4px; bottom: 4px; background: rgba(0,0,0,.78); color: #fff; font-size: 11px; font-weight: 600; padding: 1px 5px; border-radius: 4px; font-variant-numeric: tabular-nums; }
+  .thumb .len.live { background: var(--accent); color: var(--accent-ink); }
+  .hit .info { min-width: 0; cursor: pointer; }
+  .hit .t { font-weight: 600; font-size: 14px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .hit .c { color: var(--muted); font-size: 12.5px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .findfoot { display: flex; justify-content: center; gap: 8px; margin-top: 8px; }
+  .findfoot:empty { display: none; }
+  @media (max-width: 560px) {
+    .hit { grid-template-columns: 104px 1fr; }
+    .thumb { width: 104px; }
+    .hit .ghost.go { grid-column: 2; justify-self: start; }
+  }
 </style>
 </head>
 <body>
@@ -91,7 +139,7 @@
     <button class="linkish" id="logout" hidden>Log out</button>
   </header>
 
-  <form id="grab" autocomplete="off">
+  <form id="grab" autocomplete="off" novalidate>
     <div class="field">
       <input type="url" id="url" name="url" placeholder="Paste a YouTube link…" required autofocus inputmode="url">
       <button type="button" class="paste" id="paste" hidden>Paste</button>
@@ -110,8 +158,32 @@
     <span id="notice">Files are deleted from the server a few minutes after you close this window.</span>
   </p>
 
+  <section id="find" aria-label="Find a video">
+    <form id="search" role="search" autocomplete="off">
+      <input type="search" id="q" placeholder="Or search YouTube…" aria-label="Search YouTube" maxlength="200" enterkeyhint="search">
+      <button class="ghost" id="qgo">Search</button>
+    </form>
+    <div class="searchmsg" id="searchmsg" role="status"></div>
+    <div id="preview" hidden>
+      <div class="player"></div>
+      <div class="pv-row">
+        <div>
+          <div class="title"></div>
+          <div class="sub"></div>
+        </div>
+        <div class="actions">
+          <a class="ghost small" id="pv-open" target="_blank" rel="noopener noreferrer">YouTube ↗</a>
+          <button type="button" class="ghost small" id="pv-close">Close</button>
+          <button type="button" class="ghost small go" id="pv-grab">Grab</button>
+        </div>
+      </div>
+    </div>
+    <ul id="results"></ul>
+    <div class="findfoot" id="findfoot"></div>
+  </section>
+
   <ul id="jobs"></ul>
-  <div class="empty" id="empty">Nothing yet. Paste a link above.</div>
+  <div class="empty" id="empty">Nothing yet. Paste a link or search above.</div>
 </main>
 
 <template id="job-tpl">
@@ -129,6 +201,14 @@
     <div class="bar"><i></i></div>
     <div class="meta"><span class="left"></span><span class="right"></span></div>
     <div class="err" hidden></div>
+  </li>
+</template>
+
+<template id="hit-tpl">
+  <li class="hit">
+    <button type="button" class="thumb" aria-label="Preview"><img alt="" loading="lazy"><span class="len"></span></button>
+    <div class="info"><div class="t"></div><div class="c"></div></div>
+    <button type="button" class="ghost small go">Grab</button>
   </li>
 </template>
 
@@ -229,22 +309,31 @@
     timer = setTimeout(poll, active ? 1000 : 4000);
   }
 
+  async function grab(url) {
+    const r = await api("/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, preset: $("preset").value }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Something went wrong.");
+    active = true;
+    poll();
+  }
+
   $("grab").addEventListener("submit", async e => {
     e.preventDefault();
     const url = $("url").value.trim();
     if (!url) return;
-    $("go").disabled = true;
     $("formerr").textContent = "";
-    try {
-      const r = await api("/api/jobs", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, preset: $("preset").value }),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Something went wrong.");
+    if (!/^https?:\/\/\S+$/i.test(url)) {   // not a link: treat it as a search
       $("url").value = "";
-      active = true;
-      poll();
+      $("q").value = url;
+      return search(url);
+    }
+    $("go").disabled = true;
+    try {
+      await grab(url);
+      $("url").value = "";
     } catch (err) {
       $("formerr").textContent = err.message;
     } finally {
@@ -252,6 +341,205 @@
       $("url").focus();
     }
   });
+
+  // ---- search + preview
+  const hits = new Map();          // video id -> result
+  const grabbed = new Set();       // video ids queued from here, so buttons stay "Added"
+  let query = "", page = 0, searching = 0, previewing = null;
+
+  const clock = s => {
+    if (s == null) return "";
+    s = Math.round(s);
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = String(s % 60).padStart(2, "0");
+    return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+  };
+  const views = n => n == null ? "" :
+    `${new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n)} views`;
+  const byline = h => [h.channel, h.live ? "Live now" : views(h.views)].filter(Boolean).join(" · ");
+
+  function markGrabbed(btn, id) {
+    const done = grabbed.has(id);
+    btn.textContent = done ? "Added ✓" : "Grab";
+    btn.classList.toggle("added", done);
+    btn.disabled = done;
+  }
+
+  async function grabHit(id, btn) {
+    const h = hits.get(id);
+    if (!h || grabbed.has(id)) return;
+    btn.disabled = true;
+    btn.textContent = "Adding…";
+    try {
+      await grab(h.url);
+      grabbed.add(id);
+      $("searchmsg").className = "searchmsg";
+      $("searchmsg").textContent = "";
+    } catch (err) {
+      $("searchmsg").className = "searchmsg bad";
+      $("searchmsg").textContent = err.message;
+    }
+    document.querySelectorAll(`[data-vid="${id}"] .go, #pv-grab[data-vid="${id}"]`).forEach(b => markGrabbed(b, id));
+    if (!grabbed.has(id)) btn.disabled = false;
+  }
+
+  function footer() {
+    const f = $("findfoot");
+    f.replaceChildren();
+    if (!query) return;
+    if (f.dataset.more === "1") {
+      const more = Object.assign(document.createElement("button"), { type: "button", className: "ghost small", textContent: "More results" });
+      more.addEventListener("click", () => search(query, page + 1));
+      f.append(more);
+    }
+    const clear = Object.assign(document.createElement("button"), { type: "button", className: "ghost small", textContent: "Clear" });
+    clear.addEventListener("click", clearSearch);
+    f.append(clear);
+  }
+
+  function clearSearch() {
+    closePreview();
+    query = ""; page = 0; hits.clear();
+    $("results").replaceChildren();
+    $("searchmsg").textContent = "";
+    $("findfoot").dataset.more = "";
+    footer();
+    $("q").value = "";
+  }
+
+  async function search(q, p = 1) {
+    q = q.trim();
+    if (!q) return;
+    const ticket = ++searching;
+    if (p === 1) { closePreview(); query = q; hits.clear(); $("results").replaceChildren(); $("findfoot").dataset.more = ""; }
+    footer();
+    $("qgo").disabled = true;
+    $("searchmsg").className = "searchmsg";
+    $("searchmsg").textContent = p === 1 ? "Searching…" : "Loading more…";
+    try {
+      const r = await api(`/api/search?q=${encodeURIComponent(q)}&page=${p}`);
+      const data = await r.json();
+      if (ticket !== searching) return;   // a newer search took over
+      if (!r.ok) throw new Error(data.error || "Search failed.");
+      page = p;
+      for (const h of data.results) {
+        if (hits.has(h.id)) continue;
+        hits.set(h.id, h);
+        const el = $("hit-tpl").content.firstElementChild.cloneNode(true);
+        el.dataset.vid = h.id;
+        const img = el.querySelector("img");
+        img.onerror = () => { img.hidden = true; };
+        img.src = `/api/thumb/${h.id}`;
+        const len = el.querySelector(".len");
+        len.textContent = h.live ? "LIVE" : clock(h.duration);
+        len.classList.toggle("live", h.live);
+        len.hidden = !len.textContent;
+        el.querySelector(".t").textContent = h.title;
+        el.querySelector(".t").title = h.title;
+        el.querySelector(".c").textContent = byline(h);
+        markGrabbed(el.querySelector(".go"), h.id);
+        $("results").append(el);
+      }
+      $("searchmsg").textContent = hits.size ? "" : "No videos found.";
+      $("findfoot").dataset.more = data.more ? "1" : "";
+    } catch (err) {
+      if (ticket !== searching) return;
+      $("searchmsg").className = "searchmsg bad";
+      $("searchmsg").textContent = err.message;
+    } finally {
+      if (ticket === searching) { $("qgo").disabled = false; footer(); }
+    }
+  }
+
+  function openPreview(id) {
+    const h = hits.get(id);
+    if (!h) return;
+    previewing = id;
+    const pv = $("preview");
+    // Streamed through Tubby (a small 360-480p copy), so the browser never contacts YouTube.
+    stopPlayer();
+    const video = Object.assign(document.createElement("video"), {
+      controls: true, autoplay: true, playsInline: true, preload: "auto", poster: `/api/thumb/${id}`,
+    });
+    const msg = Object.assign(document.createElement("div"), { className: "pmsg" });
+    pv.querySelector(".player").replaceChildren(video, msg);
+    if (h.live) {
+      msg.textContent = "Live streams can't be previewed here.";
+    } else {
+      msg.textContent = "Loading preview…";
+      loadPreview(id, video, msg);
+    }
+    pv.querySelector(".title").textContent = h.title;
+    pv.querySelector(".sub").textContent = [byline(h), h.live ? "" : clock(h.duration)].filter(Boolean).join(" · ");
+    $("pv-open").href = h.url;
+    $("pv-grab").dataset.vid = id;
+    markGrabbed($("pv-grab"), id);
+    document.querySelectorAll(".hit").forEach(el => el.classList.toggle("playing", el.dataset.vid === id));
+    pv.hidden = false;
+    pv.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  async function loadPreview(id, video, msg) {
+    let info;
+    try {
+      const r = await api(`/api/preview/${id}`);   // the slow part: yt-dlp finds a small copy
+      info = await r.json();
+      if (!r.ok) throw new Error(info.error || "Preview failed.");
+    } catch (err) {
+      if (previewing === id) msg.textContent = err.message;
+      return;
+    }
+    if (previewing !== id || !video.isConnected) return;
+    video.addEventListener("loadeddata", () => { msg.textContent = ""; }, { once: true });
+    video.addEventListener("error", () => { msg.textContent = "Preview failed to load."; }, { once: true });
+    if (info.audio) pairAudio(video, `/api/preview/${id}/audio`);
+    video.src = `/api/preview/${id}/video`;
+  }
+
+  // Most YouTube videos no longer have a small file with both picture and sound, so the
+  // preview is often a video-only stream plus an audio-only one. The <video> element (with
+  // the controls) leads; a hidden <audio> follows it.
+  function pairAudio(video, src) {
+    const audio = Object.assign(document.createElement("audio"), { preload: "auto", src });
+    video.after(audio);
+    let stalled = false;
+    const follow = () => { if (Math.abs(audio.currentTime - video.currentTime) > 0.3) audio.currentTime = video.currentTime; };
+    const go = () => { if (!video.paused && !stalled) { follow(); audio.play().catch(() => {}); } };
+    video.addEventListener("playing", go);
+    video.addEventListener("pause", () => audio.pause());
+    video.addEventListener("waiting", () => audio.pause());
+    video.addEventListener("seeking", () => { audio.currentTime = video.currentTime; });
+    video.addEventListener("timeupdate", () => { if (!audio.paused) follow(); });
+    video.addEventListener("ratechange", () => { audio.playbackRate = video.playbackRate; });
+    video.addEventListener("volumechange", () => { audio.volume = video.volume; audio.muted = video.muted; });
+    // If the audio runs dry, hold the picture until it catches up.
+    audio.addEventListener("waiting", () => { if (!video.paused) { stalled = true; video.pause(); } });
+    audio.addEventListener("canplay", () => { if (stalled) { stalled = false; video.play().catch(() => {}); } });
+  }
+
+  function stopPlayer() {
+    for (const m of $("preview").querySelectorAll("video, audio")) {
+      m.pause(); m.removeAttribute("src"); m.load();   // also aborts the stream
+    }
+    $("preview").querySelector(".player").replaceChildren();
+  }
+
+  function closePreview() {
+    previewing = null;
+    $("preview").hidden = true;
+    stopPlayer();
+    document.querySelectorAll(".hit.playing").forEach(el => el.classList.remove("playing"));
+  }
+
+  $("search").addEventListener("submit", e => { e.preventDefault(); search($("q").value); });
+  $("results").addEventListener("click", e => {
+    const hit = e.target.closest(".hit");
+    if (!hit) return;
+    const id = hit.dataset.vid;
+    if (e.target.closest(".go")) return grabHit(id, e.target.closest(".go"));
+    if (e.target.closest(".thumb, .info")) id === previewing ? closePreview() : openPreview(id);
+  });
+  $("pv-close").addEventListener("click", closePreview);
+  $("pv-grab").addEventListener("click", e => previewing && grabHit(previewing, e.currentTarget));
 
   $("jobs").addEventListener("click", async e => {
     const btn = e.target.closest(".cancel");
@@ -277,8 +565,12 @@
   });
 
   // ?url=... prefills the box (handy for bookmarklets / share shortcuts).
-  const pre = new URLSearchParams(location.search).get("url");
-  if (pre) { $("url").value = pre; history.replaceState(null, "", "/"); }
+  // ?q=... runs a search (handy as a browser search-engine shortcut).
+  const params = new URLSearchParams(location.search);
+  const pre = params.get("url"), preq = params.get("q");
+  if (pre) $("url").value = pre;
+  if (preq) { $("q").value = preq; search(preq); }
+  if (pre || preq) history.replaceState(null, "", "/");
 
   // Tell the server the window is going away; it waits out the grace period
   // before forgetting, and a reload's next poll cancels the countdown.

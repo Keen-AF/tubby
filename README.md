@@ -1,6 +1,6 @@
 # Tubby
 
-A tiny self-hosted web page for [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste a link, pick a quality, hit **Grab**, then **Save** the file to whatever device you're on.
+A tiny self-hosted web page for [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste a link (or search YouTube right on the page), pick a quality, hit **Grab**, then **Save** the file to whatever device you're on.
 
 Files are **amnesiac**. Each browser window gets its own folder on the server. That folder is wiped 5 minutes after the window closes, or 5 minutes after it stops checking in (crash, sleep). Reloading the page, or reopening a tab you closed by mistake, keeps your files. Restarting the server wipes everything.
 
@@ -38,6 +38,12 @@ docker compose up -d --build
 
 The build runs `server.py --check`, so an image with missing tools fails to build rather than failing on your first download.
 
+## Search and preview
+
+The **Search YouTube** box under the link field finds videos without leaving the page. Results show a thumbnail, length, channel and view count. Click one to preview it in an embedded player, and hit **Grab** on the preview or any row to queue it at the selected quality. Typing words instead of a link into the link box searches too.
+
+Search runs through the bundled yt-dlp (`ytsearch`), so it needs no API key. Results come 12 at a time, up to 60, and are cached in memory for 10 minutes. Search terms are never written to the log. Thumbnails and previews are proxied through Tubby, so viewers' browsers never contact YouTube; only the server does. A preview is a small 360–480p copy that yt-dlp finds and Tubby streams on request in 10 MB chunks. Nothing is written to disk. The first play of a video takes a few seconds while yt-dlp looks it up. Live streams, and the rare video with no small combined file, show "can't be previewed" instead. **Grab** still works for those.
+
 ## Quality presets
 
 | Preset | yt-dlp format |
@@ -46,12 +52,13 @@ The build runs `server.py --check`, so an image with missing tools fails to buil
 | 1080p / 720p | best video at or below that height, plus best audio, merged to mp4 |
 | Audio | best audio converted to mp3 |
 
-Playlists are ignored; only the video in the link is downloaded.
+One video per link. If a link names a video inside a playlist, only that video is downloaded. Links to a whole playlist or channel are rejected for now.
 
 ## Handy extras
 
 - `http://<server>:8080/?url=<video-url>` opens with the box already filled in. You can use it from a bookmarklet:
   `javascript:location='http://<server>:8080/?url='+encodeURIComponent(location.href)`
+- `http://<server>:8080/?q=<words>` opens with a search already run. Add it as a custom search engine in your browser with `%s` in place of `<words>`.
 - `/healthz` returns `ok`, for monitoring.
 
 ## Run without Docker
